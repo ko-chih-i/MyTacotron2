@@ -1,134 +1,120 @@
-from __future__ import absolute_import, division, print_function
-
 import collections
-
 import tensorflow as tf
-from tacotron.models.helpers import TacoTestHelper, TacoTrainingHelper
-from tensorflow.contrib.seq2seq.python.ops import decoder
-from tensorflow.contrib.seq2seq.python.ops import helper as helper_py
-from tensorflow.python.framework import ops, tensor_shape
-from tensorflow.python.layers import base as layers_base
-from tensorflow.python.ops import rnn_cell_impl
-from tensorflow.python.util import nest
 
 
 class CustomDecoderOutput(
-		collections.namedtuple("CustomDecoderOutput", ("rnn_output", "token_output", "sample_id"))):
-	pass
+    collections.namedtuple("CustomDecoderOutput", ("rnn_output", "token_output", "sample_id"))
+):
+    """Output of the custom decoder."""
+    pass
 
 
-class CustomDecoder(decoder.Decoder):
-	"""Custom sampling decoder.
+class CustomDecoder(tf.keras.layers.Layer):
+    """Custom sampling decoder for Tacotron 2."""
 
-	Allows for stop token prediction at inference time
-	and returns equivalent loss in training time.
+    def __init__(self, cell, sampler, output_layer=None):
+        """
+        Initialize CustomDecoder.
 
-	Note:
-	Only use this decoder with Tacotron 2 as it only accepts tacotron custom helpers
-	"""
+        Args:
+            cell: A tf.keras.layers.RNNCell instance.
+            sampler: A sampler instance for training or inference.
+            output_layer: An optional tf.keras.layers.Dense layer for projecting outputs.
+        """
+        super(CustomDecoder, self).__init__()
+        self.cell = cell
+        self.sampler = sampler
+        self.output_layer = output_layer
 
-	def __init__(self, cell, helper, initial_state, output_layer=None):
-		"""Initialize CustomDecoder.
-		Args:
-			cell: An `RNNCell` instance.
-			helper: A `Helper` instance.
-			initial_state: A (possibly nested tuple of...) tensors and TensorArrays.
-				The initial state of the RNNCell.
-			output_layer: (Optional) An instance of `tf.layers.Layer`, i.e.,
-				`tf.layers.Dense`. Optional layer to apply to the RNN output prior
-				to storing the result or sampling.
-		Raises:
-			TypeError: if `cell`, `helper` or `output_layer` have an incorrect type.
-		"""
-		rnn_cell_impl.assert_like_rnncell(type(cell), cell)
-		if not isinstance(helper, helper_py.Helper):
-			raise TypeError("helper must be a Helper, received: %s" % type(helper))
-		if (output_layer is not None
-				and not isinstance(output_layer, layers_base.Layer)):
-			raise TypeError(
-					"output_layer must be a Layer, received: %s" % type(output_layer))
-		self._cell = cell
-		self._helper = helper
-		self._initial_state = initial_state
-		self._output_layer = output_layer
+    @property
+    def batch_size(self):
+        """Returns the batch size of the sampler."""
+        return self.sampler.batch_size
 
-	@property
-	def batch_size(self):
-		return self._helper.batch_size
+    @property
+    def output_size(self):
+        """Defines the output size of the decoder."""
+        return CustomDecoderOutput(
+            rnn_output=self.cell.output_size,
+            token_output=self.cell.output_size,
+            sample_id=self.sampler.sample_ids_shape,
+        )
 
-	def _rnn_output_size(self):
-		size = self._cell.output_size
-		if self._output_layer is None:
-			return size
-		else:
-			# To use layer's compute_output_shape, we need to convert the
-			# RNNCell's output_size entries into shapes with an unknown
-			# batch size.  We then pass this through the layer's
-			# compute_output_shape and read off all but the first (batch)
-			# dimensions to get the output size of the rnn with the layer
-			# applied to the top.
-			output_shape_with_unknown_batch = nest.map_structure(
-					lambda s: tensor_shape.TensorShape([None]).concatenate(s),
-					size)
-			layer_output_shape = self._output_layer._compute_output_shape(  # pylint: disable=protected-access
-					output_shape_with_unknown_batch)
-			return nest.map_structure(lambda s: s[1:], layer_output_shape)
+    @property
+    def output_dtype(self):
+        """Defines the output dtype of the decoder."""
+        dtype = tf.float32  # Assume RNN cell outputs are float32
+        return CustomDecoderOutput(
+            rnn_output=dtype, token_output=dtype, sample_id=self.sampler.sample_ids_dtype
+        )
 
-	@property
-	def output_size(self):
-		# Return the cell output and the id
-		return CustomDecoderOutput(
-				rnn_output=self._rnn_output_size(),
-				token_output=self._helper.token_output_size,
-				sample_id=self._helper.sample_ids_shape)
+    def initialize(self, initial_state, inputs):
+        """
+        Initialize the decoder.
 
-	@property
-	def output_dtype(self):
-		# Assume the dtype of the cell is the output_size structure
-		# containing the input_state's first component's dtype.
-		# Return that structure and the sample_ids_dtype from the helper.
-		dtype = nest.flatten(self._initial_state)[0].dtype
-		return CustomDecoderOutput(
-				nest.map_structure(lambda _: dtype, self._rnn_output_size()),
-				tf.float32,
-				self._helper.sample_ids_dtype)
+        Args:
+            initial_state: Initial state for the RNN cell.
+            inputs: Inputs to the sampler.
 
-	def initialize(self, name=None):
-		"""Initialize the decoder.
-		Args:
-			name: Name scope for any created operations.
-		Returns:
-			`(finished, first_inputs, initial_state)`.
-		"""
-		return self._helper.initialize() + (self._initial_state,)
+        Returns:
+            Tuple of finished flags, initial inputs, and initial state.
+        """
+        self.initial_state = initial_state
+        self.inputs = inputs
+        finished, initial_inputs = self.sampler.initialize(inputs)
+        return finished, initial_inputs, initial_state
 
-	def step(self, time, inputs, state, name=None):
-		"""Perform a custom decoding step.
-		Enables for dyanmic <stop_token> prediction
-		Args:
-			time: scalar `int32` tensor.
-			inputs: A (structure of) input tensors.
-			state: A (structure of) state tensors and TensorArrays.
-			name: Name scope for any created operations.
-		Returns:
-			`(outputs, next_state, next_inputs, finished)`.
-		"""
-		with ops.name_scope(name, "CustomDecoderStep", (time, inputs, state)):
-			#Call outputprojection wrapper cell
-			(cell_outputs, stop_token), cell_state = self._cell(inputs, state)
+    def step(self, time, inputs, state):
+        """
+        Perform a decoding step.
 
-			#apply output_layer (if existant)
-			if self._output_layer is not None:
-				cell_outputs = self._output_layer(cell_outputs)
-			sample_ids = self._helper.sample(
-					time=time, outputs=cell_outputs, state=cell_state)
+        Args:
+            time: Current time step.
+            inputs: Input tensors at the current step.
+            state: Current state of the RNN cell.
 
-			(finished, next_inputs, next_state) = self._helper.next_inputs(
-					time=time,
-					outputs=cell_outputs,
-					state=cell_state,
-					sample_ids=sample_ids,
-					stop_token_prediction=stop_token)
+        Returns:
+            Tuple of outputs, next state, next inputs, and finished flags.
+        """
+        # Call the RNN cell
+        rnn_output, next_state = self.cell(inputs, state)
 
-		outputs = CustomDecoderOutput(cell_outputs, stop_token, sample_ids)
-		return (outputs, next_state, next_inputs, finished)
+        # Apply the output layer if it exists
+        if self.output_layer is not None:
+            rnn_output = self.output_layer(rnn_output)
+
+        # Get sample ids from the sampler
+        sample_ids = self.sampler.sample(time=time, outputs=rnn_output, state=next_state)
+
+        # Get next inputs and finished flags from the sampler
+        finished, next_inputs = self.sampler.next_inputs(
+            time=time, outputs=rnn_output, state=next_state, sample_ids=sample_ids
+        )
+
+        # Create the output
+        outputs = CustomDecoderOutput(rnn_output=rnn_output, token_output=rnn_output, sample_id=sample_ids)
+        return outputs, next_state, next_inputs, finished
+
+    def call(self, inputs, initial_state):
+        """
+        Implements the decoding loop.
+
+        Args:
+            inputs: Inputs to the decoder.
+            initial_state: Initial state for the RNN cell.
+
+        Returns:
+            All outputs, states, and final sample ids.
+        """
+        finished, next_inputs, state = self.initialize(initial_state, inputs)
+        time = tf.constant(0, dtype=tf.int32)
+        outputs = []
+
+        while not tf.reduce_all(finished):
+            output, state, next_inputs, finished = self.step(time, next_inputs, state)
+            outputs.append(output)
+            time += 1
+
+        final_outputs = tf.nest.map_structure(lambda *tensors: tf.stack(tensors), *outputs)
+        return final_outputs, state
+

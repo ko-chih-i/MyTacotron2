@@ -241,9 +241,15 @@ def _mel_to_linear_tensorflow(mel_spectrogram, hparams):
 	return tf.transpose(tf.maximum(1e-10, tf.matmul(tf.cast(_inv_mel_basis, tf.float32), tf.transpose(mel_spectrogram, [1, 0]))), [1, 0])
 
 def _build_mel_basis(hparams):
-	assert hparams.fmax <= hparams.sample_rate // 2
-	return librosa.filters.mel(hparams.sample_rate, hparams.n_fft, n_mels=hparams.num_mels,
-							   fmin=hparams.fmin, fmax=hparams.fmax)
+    assert hparams.fmax <= hparams.sample_rate // 2
+    return librosa.filters.mel(
+        sr=hparams.sample_rate,
+        n_fft=hparams.n_fft,
+        n_mels=hparams.num_mels,
+        fmin=hparams.fmin,
+        fmax=hparams.fmax
+    )
+
 
 def _amp_to_db(x, hparams):
 	min_level = np.exp(hparams.min_level_db / 20 * np.log(10))

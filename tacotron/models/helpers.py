@@ -1,6 +1,8 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.contrib.seq2seq import Helper
+from tensorflow.keras.utils import Sequence as Helper
+
+
 
 
 class TacoTestHelper(Helper):

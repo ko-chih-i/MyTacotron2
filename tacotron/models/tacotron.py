@@ -3,7 +3,8 @@ from tacotron.utils.symbols import symbols
 from infolog import log
 from tacotron.models.helpers import TacoTrainingHelper, TacoTestHelper
 from tacotron.models.modules import *
-from tensorflow.contrib.seq2seq import dynamic_decode
+from tensorflow.keras.utils import Sequence
+
 from tacotron.models.Architecture_wrappers import TacotronEncoderCell, TacotronDecoderCell
 from tacotron.models.custom_decoder import CustomDecoder
 from tacotron.models.attention import LocationSensitiveAttention
